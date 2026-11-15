@@ -82,11 +82,15 @@ function script.update(dt)
 
     local speed = playerCar.speedKmh or 0
 
-    -- 1. Проверка на столкновение (сброс очков при ударе)
-    if playerCar.collidedWith ~= 0 and currentScore > 0 then
+        -- 1. Проверка на столкновение (сброс очков при ударе об другую машину или сильном ударе об отбойник)
+    local hitOtherCar = playerCar.collidedWith and playerCar.collidedWith > 0
+    local hardWallHit = playerCar.acceleration and (math.abs(playerCar.acceleration.x) > 3.5 or math.abs(playerCar.acceleration.z) > 3.5)
+
+    if (hitOtherCar or hardWallHit) and currentScore > 0 then
         resetCombo("СТОЛКНОВЕНИЕ! СЕРИЯ СБРОШЕНА", true)
         return
     end
+
 
     -- 2. Проверка минимальной скорости
     if speed < minSpeedKmh then
