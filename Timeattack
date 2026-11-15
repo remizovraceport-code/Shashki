@@ -21,7 +21,8 @@ local sectors = {
 local activeSectorIdx = nil
 local currentTime = 0.0
 local lastTime = nil
-local cancelOnCrash = true
+local lastDelta = nil
+local isNewRecord = false
 
 -- Уведомления
 local statusText = ""
@@ -36,6 +37,12 @@ local function formatTime(sec)
     return string.format("%02d'%02d\"%03d", mins, secs, millis)
 end
 
+local function formatDelta(diff)
+    if not diff then return "" end
+    local sign = diff > 0 and "+" or "-"
+    return string.format("%s%.3fs", sign, math.abs(diff))
+end
+
 local function showBanner(text, color, duration)
     statusText = text
     statusColor = color
@@ -43,7 +50,7 @@ local function showBanner(text, color, duration)
 end
 
 function script.update(dt)
-    -- Если активен баттл — сбрасываем текущую попытку и не работаем
+    -- Если активен баттл — сбрасываем текущую попытку и скрываем HUD
     if battleSync and battleSync.isActive then
         activeSectorIdx = nil
         currentTime = 0.0
@@ -60,7 +67,7 @@ function script.update(dt)
     local pos = playerCar.position
     local speed = playerCar.speedKmh or 0
 
-    -- 1. Проверка старта сектора
+    -- 1. Проверка пересечения линии СТАРТА
     if not activeSectorIdx then
         for i, sec in ipairs(sectors) do
             if pos:distance(sec.startPos) <= sec.gateRadius and speed > 20.0 then
@@ -71,32 +78,30 @@ function script.update(dt)
             end
         end
     else
-        -- 2. Идет замер времени
+        -- 2. Идет замер времени (без сброса при аварии)
         local sec = sectors[activeSectorIdx]
         currentTime = currentTime + dt
 
-        -- Сброс при сильной аварии
-        if cancelOnCrash then
-            local hitOtherCar = playerCar.collidedWith and playerCar.collidedWith > 0
-            local hardWallHit = playerCar.acceleration and (math.abs(playerCar.acceleration.x) > 4.0 or math.abs(playerCar.acceleration.z) > 4.0)
-            if hitOtherCar or hardWallHit then
-                activeSectorIdx = nil
-                currentTime = 0.0
-                showBanner("ПОПЫТКА ПРЕРВАНА: АВАРИЯ", rgbm(1.0, 0.25, 0.2, 1), 3.5)
-                return
-            end
-        end
-
-        -- 3. Проверка финиша
+        -- 3. Проверка пересечения линии ФИНИША
         if pos:distance(sec.finishPos) <= sec.gateRadius then
             lastTime = currentTime
-            if not sec.bestTime or currentTime < sec.bestTime then
+
+            if not sec.bestTime then
                 sec.bestTime = currentTime
-                showBanner(string.format("НОВЫЙ РЕКОРД: %s!", formatTime(sec.bestTime)), rgbm(1.0, 0.65, 0.35, 1), 5.0)
+                lastDelta = 0.0
+                isNewRecord = true
+                showBanner(string.format("ФИНИШ! ВРЕМЯ: %s", formatTime(lastTime)), rgbm(1.0, 0.65, 0.35, 1), 4.5)
+            elseif currentTime < sec.bestTime then
+                lastDelta = currentTime - sec.bestTime -- отрицательная дельта (улучшение)
+                sec.bestTime = currentTime
+                isNewRecord = true
+                showBanner(string.format("НОВЫЙ РЕКОРД! %s (%s)", formatTime(lastTime), formatDelta(lastDelta)), rgbm(0.3, 1.0, 0.45, 1), 5.0)
             else
-                local diff = currentTime - sec.bestTime
-                showBanner(string.format("ФИНИШ: %s (+%.3f с)", formatTime(lastTime), diff), rgbm(1.0, 1.0, 1.0, 1), 5.0)
+                lastDelta = currentTime - sec.bestTime -- положительная дельта (хуже лучшего)
+                isNewRecord = false
+                showBanner(string.format("ФИНИШ! %s (%s)", formatTime(lastTime), formatDelta(lastDelta)), rgbm(1.0, 1.0, 1.0, 1), 4.5)
             end
+
             activeSectorIdx = nil
         end
     end
@@ -115,14 +120,17 @@ function script.drawUI()
     local distToStart = playerCar.position:distance(displaySec.startPos)
     local distToFinish = playerCar.position:distance(displaySec.finishPos)
 
-    -- Отображаем HUD ТОЛЬКО в заезде, при показе баннера или если до старта <= 400 метров
-    if not activeSectorIdx and statusTimer <= 0 and distToStart > 400.0 then
+    -- Отображаем HUD:
+    -- 1) во время активного заезда
+    -- 2) если уже был завершен хотя бы один заезд (lastTime ~= nil)
+    -- 3) если до старта <= 400 метров
+    if not activeSectorIdx and not lastTime and distToStart > 400.0 then
         return
     end
 
     -- Позиция: сверху справа
-    local boxW = math.floor(320 * math.max(0.85, scaleY))
-    local boxH = math.floor(74 * math.max(0.85, scaleY))
+    local boxW = math.floor(340 * math.max(0.85, scaleY))
+    local boxH = math.floor(82 * math.max(0.85, scaleY))
     local margin = math.floor(30 * math.max(0.85, scaleY))
     local x1 = screenSize.x - boxW - margin
     local y1 = margin
@@ -132,27 +140,42 @@ function script.drawUI()
     local borderColor = activeSectorIdx and rgbm(1.0, 0.65, 0.35, 0.9) or rgbm(1.0, 1.0, 1.0, 0.35)
     ui.drawRect(vec2(x1, y1), vec2(x1 + boxW, y1 + boxH), borderColor, 3, 1.5)
 
-    -- Заголовок сектора
+    -- Верхняя строка: Название маршрута и дельта (если заезд завершен)
     ui.setCursor(vec2(x1 + 14, y1 + 8))
     ui.textColored(displaySec.name, rgbm(0.85, 0.85, 0.88, 0.95))
 
-    -- Основная строка времени или дистанции до старта
-    ui.setCursor(vec2(x1 + 14, y1 + 34))
+    if not activeSectorIdx and lastDelta ~= nil then
+        local deltaStr = formatDelta(lastDelta)
+        local deltaColor = (lastDelta <= 0) and rgbm(0.3, 1.0, 0.45, 1) or rgbm(1.0, 0.35, 0.35, 1)
+        if lastDelta == 0 and isNewRecord then
+            deltaStr = "FIRST RUN"
+            deltaColor = rgbm(1.0, 0.65, 0.35, 1)
+        end
+        local dSize = ui.measureText(deltaStr)
+        ui.setCursor(vec2(x1 + boxW - dSize.x - 14, y1 + 8))
+        ui.textColored(deltaStr, deltaColor)
+    end
+
+    -- Средняя строка: Текущее время / Последний заезд / Дистанция до старта
+    ui.setCursor(vec2(x1 + 14, y1 + 32))
     if activeSectorIdx then
         ui.textColored("TIME: " .. formatTime(currentTime), rgbm(1.0, 1.0, 1.0, 1))
-    elseif statusTimer > 0 and lastTime then
+    elseif lastTime then
         ui.textColored("LAST: " .. formatTime(lastTime), rgbm(1.0, 1.0, 1.0, 1))
     else
         ui.textColored(string.format("ДО СТАРТА: %.0f м", distToStart), rgbm(0.9, 0.9, 0.9, 0.95))
     end
 
-    -- Правая колонка: дистанция до финиша или лучший результат
-    local rightStr = activeSectorIdx
-        and string.format("ФИНИШ: %.0f м", distToFinish)
-        or ("BEST: " .. formatTime(displaySec.bestTime))
-    local rightSize = ui.measureText(rightStr)
-    ui.setCursor(vec2(x1 + boxW - rightSize.x - 14, y1 + 34))
-    ui.textColored(rightStr, rgbm(1.0, 0.65, 0.35, 0.95))
+    -- Нижняя строка: Лучшее время за сессию (BEST) и дистанция до финиша во время заезда
+    ui.setCursor(vec2(x1 + 14, y1 + 54))
+    ui.textColored("BEST: " .. formatTime(displaySec.bestTime), rgbm(1.0, 0.65, 0.35, 0.95))
+
+    if activeSectorIdx then
+        local finStr = string.format("ФИНИШ: %.0f м", distToFinish)
+        local finSize = ui.measureText(finStr)
+        ui.setCursor(vec2(x1 + boxW - finSize.x - 14, y1 + 54))
+        ui.textColored(finStr, rgbm(0.8, 0.8, 0.85, 0.9))
+    end
 
     -- Всплывающий баннер старта / финиша
     if statusTimer > 0 and statusText ~= "" then
