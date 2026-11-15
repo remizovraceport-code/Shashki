@@ -1,1 +1,205 @@
+local playerCar = ac.getCar(0)
+
+-- Настройки счетчика шашек (аналогично PatreonOvertakePlugin)
+local minSpeedKmh = 80.0            -- Минимальная скорость для набора очков (км/ч)
+local overtakeDistance = 7.5        -- Дистанция обычного обгона (м)
+local closeOvertakeDistance = 4.0   -- Дистанция близкого обгона ("ВПРИТИРКУ", м)
+local basePoints = 100              -- Базовые очки за один обгон
+local comboTimeLimit = 5.0          -- Время на следующий обгон до сброса комбо (сек)
+local maxMultiplier = 50            -- Максимальный множитель (x50)
+
+-- Состояние текущей серии
+local currentScore = 0
+local personalBest = 0
+local comboMultiplier = 1
+local comboTimer = 0.0
+local overtakenCars = {}            -- Таблица недавно обогнанных машин (защита от повторного начисления)
+
+-- Уведомления о событиях
+local statusText = ""
+local statusColor = rgbm(1, 1, 1, 1)
+local statusTimer = 0.0
+
+-- Кэш трафика для оптимизации FPS
+local trafficCars = {}
+local trafficRefreshTimer = 0.0
+
+local function refreshTrafficList()
+    trafficCars = {}
+    local totalCars = ac.getSim().carsCount
+    for i = 1, totalCars - 1 do
+        local name = ac.getDriverName(i)
+        if name and string.find(string.lower(name), "traffic") ~= nil then
+            table.insert(trafficCars, i)
+        end
+    end
+end
+
+local function triggerStatus(text, color, duration)
+    statusText = text
+    statusColor = color
+    statusTimer = duration or 2.5
+end
+
+local function resetCombo(reasonText, isCrash)
+    if currentScore > 0 then
+        if currentScore > personalBest then
+            personalBest = currentScore
+        end
+        if reasonText then
+            local col = isCrash and rgbm(1.0, 0.25, 0.2, 1) or rgbm(0.85, 0.85, 0.85, 1)
+            triggerStatus(reasonText, col, 2.5)
+        end
+    end
+    currentScore = 0
+    comboMultiplier = 1
+    comboTimer = 0.0
+    overtakenCars = {}
+end
+
+function script.update(dt)
+    if statusTimer > 0 then
+        statusTimer = statusTimer - dt
+    end
+
+    -- Обновляем список машин трафика раз в 2 секунды
+    trafficRefreshTimer = trafficRefreshTimer - dt
+    if trafficRefreshTimer <= 0 then
+        trafficRefreshTimer = 2.0
+        refreshTrafficList()
+    end
+
+    -- Уменьшаем кулдаун для уже обогнанных машин
+    for carIdx, cooldown in pairs(overtakenCars) do
+        if cooldown - dt <= 0 then
+            overtakenCars[carIdx] = nil
+        else
+            overtakenCars[carIdx] = cooldown - dt
+        end
+    end
+
+    if not playerCar then return end
+
+    local speed = playerCar.speedKmh or 0
+
+    -- 1. Проверка на столкновение (сброс очков при ударе)
+    if playerCar.collidedWith ~= 0 and currentScore > 0 then
+        resetCombo("СТОЛКНОВЕНИЕ! СЕРИЯ СБРОШЕНА", true)
+        return
+    end
+
+    -- 2. Проверка минимальной скорости
+    if speed < minSpeedKmh then
+        if currentScore > 0 then
+            resetCombo(string.format("СКОРОСТЬ НИЖЕ %d КМ/Ч", minSpeedKmh), false)
+        end
+        return
+    end
+
+    -- 3. Таймер комбо (если давно никого не обгонял)
+    if currentScore > 0 then
+        comboTimer = comboTimer - dt
+        if comboTimer <= 0 then
+            resetCombo("ВРЕМЯ СЕРИИ ВЫШЛО", false)
+            return
+        end
+    end
+
+    -- 4. Поиск обгонов трафика
+    for _, idx in ipairs(trafficCars) do
+        if not overtakenCars[idx] then
+            local tCar = ac.getCar(idx)
+            if tCar and tCar.isConnected then
+                local toTraffic = tCar.position - playerCar.position
+                local dist = toTraffic:length()
+
+                if dist <= overtakeDistance then
+                    -- Проверяем, что машина трафика осталась позади бампера игрока
+                    local forwardDot = playerCar.look:dot(toTraffic)
+                    if forwardDot < -0.5 then
+                        local isClose = dist <= closeOvertakeDistance
+                        local pointsEarned = basePoints * comboMultiplier
+
+                        if isClose then
+                            pointsEarned = pointsEarned * 2
+                            triggerStatus(string.format("ВПРИТИРКУ! +%d", pointsEarned), rgbm(1.0, 0.65, 0.35, 1), 1.8)
+                        else
+                            triggerStatus(string.format("ОБГОН! +%d", pointsEarned), rgbm(1.0, 1.0, 1.0, 0.95), 1.5)
+                        end
+
+                        currentScore = currentScore + pointsEarned
+                        if currentScore > personalBest then
+                            personalBest = currentScore
+                        end
+
+                        comboMultiplier = math.min(maxMultiplier, comboMultiplier + 1)
+                        comboTimer = comboTimeLimit
+                        overtakenCars[idx] = 6.0 -- Защита от повторного зачета этой же машины на 6 сек
+                    end
+                end
+            end
+        end
+    end
+end
+
+function script.drawUI()
+    local screenSize = ac.getUI().windowSize
+    local speed = playerCar and (playerCar.speedKmh or 0) or 0
+
+    -- Скрываем HUD, если игрок стоит на месте и нет активных уведомлений
+    if currentScore == 0 and personalBest == 0 and statusTimer <= 0 and speed < 20 then
+        return
+    end
+
+    -- Позиция блока: справа вверху, чтобы не перекрывать верхний центральный HUD дуэлей
+    local boxW = 250
+    local boxH = 82
+    local x1 = screenSize.x - boxW - 26
+    local y1 = 26
+
+    -- Основная плашка в стиле TXR
+    ui.drawRectFilled(vec2(x1, y1), vec2(x1 + boxW, y1 + boxH), rgbm(0.05, 0.05, 0.07, 0.88), 2)
+    local borderColor = currentScore > 0 and rgbm(1.0, 0.65, 0.35, 0.95) or rgbm(1.0, 1.0, 1.0, 0.45)
+    ui.drawRect(vec2(x1, y1), vec2(x1 + boxW, y1 + boxH), borderColor, 2, 1.5)
+
+    -- Заголовок и множитель комбо
+    ui.setCursor(vec2(x1 + 12, y1 + 8))
+    ui.textColored("OVERTAKE SCORE", rgbm(0.75, 0.75, 0.78, 1))
+
+    local multText = string.format("x%d", comboMultiplier)
+    local multSize = ui.measureText(multText)
+    local multColor = comboMultiplier > 1 and rgbm(1.0, 0.65, 0.35, 1) or rgbm(0.6, 0.6, 0.6, 1)
+    ui.setCursor(vec2(x1 + boxW - multSize.x - 12, y1 + 8))
+    ui.textColored(multText, multColor)
+
+    -- Текущие очки серии
+    local scoreStr = string.format("%d PTS", currentScore)
+    ui.setCursor(vec2(x1 + 12, y1 + 30))
+    ui.textColored(scoreStr, rgbm(1.0, 1.0, 1.0, 1))
+
+    -- Личный рекорд за сессию
+    local bestStr = string.format("BEST: %d", personalBest)
+    local bestSize = ui.measureText(bestStr)
+    ui.setCursor(vec2(x1 + boxW - bestSize.x - 12, y1 + 52))
+    ui.textColored(bestStr, rgbm(0.7, 0.7, 0.75, 0.9))
+
+    -- Полоска таймера комбо внизу плашки
+    if currentScore > 0 and comboTimer > 0 then
+        local ratio = math.max(0.0, math.min(1.0, comboTimer / comboTimeLimit))
+        local barY = y1 + boxH - 5
+        ui.drawRectFilled(vec2(x1 + 2, barY), vec2(x1 + 2 + (boxW - 4) * ratio, y1 + boxH - 2), rgbm(1.0, 0.65, 0.35, 1))
+    end
+
+    -- Всплывающее уведомление под плашкой (Впритык / Столкновение / Сброс)
+    if statusTimer > 0 and statusText ~= "" then
+        local stH = 26
+        local stY = y1 + boxH + 6
+        ui.drawRectFilled(vec2(x1, stY), vec2(x1 + boxW, stY + stH), rgbm(0.05, 0.05, 0.07, 0.92), 2)
+        ui.drawRect(vec2(x1, stY), vec2(x1 + boxW, stY + stH), statusColor, 2, 1.2)
+
+        local stSize = ui.measureText(statusText)
+        ui.setCursor(vec2(x1 + (boxW - stSize.x) * 0.5, stY + (stH - stSize.y) * 0.5))
+        ui.textColored(statusText, statusColor)
+    end
+end
 
