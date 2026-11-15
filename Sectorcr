@@ -1,1 +1,171 @@
+local playerCar = ac.getCar(0)
+
+-- === РЕЖИМ НАСТРОЙКИ КООРДИНАТ ===
+-- Поставь true, чтобы увидеть кнопки записи старта и финиша прямо в игре.
+-- Когда впишешь свои координаты ниже, поменяй на false!
+local setupMode = true
+
+-- === КОНФИГУРАЦИЯ СЕКТОРОВ ===
+-- Выезд со спавна Main Layout (Shibaura PA -> C1 Inner)
+local sectors = {
+    {
+        name = "SPAWN 2-LANE SPRINT",
+        startPos = vec3(-2385.1, 14.0, -980.4),   -- Замени на свои координаты старта
+        finishPos = vec3(-1890.0, 12.5, -1540.2), -- Замени на свои координаты финиша
+        gateRadius = 16.0,                        -- Ширина двухполоски (16 метров)
+        bestTime = nil
+    }
+}
+
+-- Состояние таймера
+local activeSectorIdx = nil
+local currentTime = 0.0
+local lastTime = nil
+local cancelOnCrash = true
+
+-- Уведомления
+local statusText = ""
+local statusColor = rgbm(1, 1, 1, 1)
+local statusTimer = 0.0
+
+local function formatTime(sec)
+    if not sec then return "--'--\"---" end
+    local mins = math.floor(sec / 60)
+    local secs = math.floor(sec % 60)
+    local millis = math.floor((sec * 1000) % 1000)
+    return string.format("%02d'%02d\"%03d", mins, secs, millis)
+end
+
+local function showBanner(text, color, duration)
+    statusText = text
+    statusColor = color
+    statusTimer = duration or 3.5
+end
+
+function script.update(dt)
+    if statusTimer > 0 then
+        statusTimer = statusTimer - dt
+    end
+
+    if not playerCar then return end
+
+    local pos = playerCar.position
+    local speed = playerCar.speedKmh or 0
+
+    -- 1. Проверка старта любого из секторов
+    if not activeSectorIdx then
+        for i, sec in ipairs(sectors) do
+            if pos:distance(sec.startPos) <= sec.gateRadius and speed > 30.0 then
+                activeSectorIdx = i
+                currentTime = 0.0
+                showBanner("СТАРТ: " .. sec.name, rgbm(1.0, 0.65, 0.35, 1), 2.5)
+                break
+            end
+        end
+    else
+        -- 2. Идет замер времени
+        local sec = sectors[activeSectorIdx]
+        currentTime = currentTime + dt
+
+        -- Сброс при аварии
+        if cancelOnCrash then
+            local hitOtherCar = playerCar.collidedWith and playerCar.collidedWith > 0
+            local hardWallHit = playerCar.acceleration and (math.abs(playerCar.acceleration.x) > 4.0 or math.abs(playerCar.acceleration.z) > 4.0)
+            if hitOtherCar or hardWallHit then
+                activeSectorIdx = nil
+                currentTime = 0.0
+                showBanner("ПОПЫТКА ПРЕРВАНА: АВАРИЯ", rgbm(1.0, 0.25, 0.2, 1), 3.0)
+                return
+            end
+        end
+
+        -- 3. Проверка финиша
+        if pos:distance(sec.finishPos) <= sec.gateRadius then
+            lastTime = currentTime
+            if not sec.bestTime or currentTime < sec.bestTime then
+                sec.bestTime = currentTime
+                showBanner(string.format("НОВЫЙ РЕКОРД: %s!", formatTime(sec.bestTime)), rgbm(1.0, 0.65, 0.35, 1), 5.0)
+            else
+                local diff = currentTime - sec.bestTime
+                showBanner(string.format("ФИНИШ: %s (+%.3f с)", formatTime(lastTime), diff), rgbm(1.0, 1.0, 1.0, 1), 4.5)
+            end
+            activeSectorIdx = nil
+        end
+    end
+end
+
+function script.drawUI()
+    local screenSize = ac.getUI().windowSize
+    local scaleY = screenSize.y / 1440.0
+
+    -- === ПАНЕЛЬ ЗАПИСИ КООРДИНАТ (ЕСЛИ setupMode = true) ===
+    if setupMode and playerCar then
+        local p = playerCar.position
+        local dbgW = 460
+        local dbgH = 110
+        local dx = 30
+        local dy = screenSize.y - dbgH - 30
+
+        ui.drawRectFilled(vec2(dx, dy), vec2(dx + dbgW, dy + dbgH), rgbm(0.05, 0.05, 0.07, 0.85), 4)
+        ui.drawRect(vec2(dx, dy), vec2(dx + dbgW, dy + dbgH), rgbm(1.0, 0.65, 0.35, 0.9), 4, 1.5)
+
+        ui.setCursor(vec2(dx + 12, dy + 10))
+        ui.textColored(string.format("ТЕКУЩИЕ КООРДИНАТЫ: vec3(%.1f, %.1f, %.1f)", p.x, p.y, p.z), rgbm(1, 1, 1, 1))
+
+        ui.setCursor(vec2(dx + 12, dy + 38))
+        if ui.button("1. ЗАДАТЬ СТАРТ ЗДЕСЬ", vec2(210, 28)) then
+            sectors[1].startPos = vec3(p.x, p.y, p.z)
+            showBanner("ТОЧКА СТАРТА ОБНОВЛЕНА!", rgbm(0.3, 1.0, 0.4, 1), 2.5)
+        end
+
+        ui.setCursor(vec2(dx + 235, dy + 38))
+        if ui.button("2. ЗАДАТЬ ФИНИШ ЗДЕСЬ", vec2(210, 28)) then
+            sectors[1].finishPos = vec3(p.x, p.y, p.z)
+            showBanner("ТОЧКА ФИНИША ОБНОВЛЕНА!", rgbm(0.3, 1.0, 0.4, 1), 2.5)
+        end
+
+        ui.setCursor(vec2(dx + 12, dy + 76))
+        ui.textColored(string.format("S: (%.1f, %.1f, %.1f)  |  F: (%.1f, %.1f, %.1f)",
+            sectors[1].startPos.x, sectors[1].startPos.y, sectors[1].startPos.z,
+            sectors[1].finishPos.x, sectors[1].finishPos.y, sectors[1].finishPos.z), rgbm(0.75, 0.75, 0.75, 1))
+    end
+
+    -- === ОСНОВНОЙ HUD ТАЙМЕРА (3440x1440, ПОЛУПРОЗРАЧНЫЙ) ===
+    local displaySec = activeSectorIdx and sectors[activeSectorIdx] or sectors[1]
+    if not activeSectorIdx and statusTimer <= 0 and not displaySec.bestTime then
+        return
+    end
+
+    local boxW = math.floor(310 * math.max(0.85, scaleY))
+    local boxH = math.floor(74 * math.max(0.85, scaleY))
+    local x1 = (screenSize.x * 0.5) - boxW - math.floor(190 * math.max(0.85, scaleY))
+    local y1 = math.floor(115 * scaleY)
+
+    ui.drawRectFilled(vec2(x1, y1), vec2(x1 + boxW, y1 + boxH), rgbm(0.05, 0.05, 0.07, 0.45), 3)
+    local borderColor = activeSectorIdx and rgbm(1.0, 0.65, 0.35, 0.9) or rgbm(1.0, 1.0, 1.0, 0.35)
+    ui.drawRect(vec2(x1, y1), vec2(x1 + boxW, y1 + boxH), borderColor, 3, 1.5)
+
+    ui.setCursor(vec2(x1 + 14, y1 + 8))
+    ui.textColored(displaySec.name, rgbm(0.85, 0.85, 0.88, 0.95))
+
+    local timeStr = activeSectorIdx and formatTime(currentTime) or formatTime(lastTime)
+    ui.setCursor(vec2(x1 + 14, y1 + 34))
+    ui.textColored("TIME: " .. timeStr, rgbm(1.0, 1.0, 1.0, 1))
+
+    local bestStr = "BEST: " .. formatTime(displaySec.bestTime)
+    local bestSize = ui.measureText(bestStr)
+    ui.setCursor(vec2(x1 + boxW - bestSize.x - 14, y1 + 34))
+    ui.textColored(bestStr, rgbm(1.0, 0.65, 0.35, 0.95))
+
+    if statusTimer > 0 and statusText ~= "" then
+        local stH = math.floor(28 * math.max(0.85, scaleY))
+        local stY = y1 + boxH + 6
+        ui.drawRectFilled(vec2(x1, stY), vec2(x1 + boxW, stY + stH), rgbm(0.05, 0.05, 0.07, 0.55), 3)
+        ui.drawRect(vec2(x1, stY), vec2(x1 + boxW, stY + stH), statusColor, 3, 1.2)
+
+        local stSize = ui.measureText(statusText)
+        ui.setCursor(vec2(x1 + (boxW - stSize.x) * 0.5, stY + (stH - stSize.y) * 0.5))
+        ui.textColored(statusText, statusColor)
+    end
+end
 
