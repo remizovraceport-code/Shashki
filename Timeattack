@@ -1,11 +1,17 @@
 local playerCar = ac.getCar(0)
 
+-- Связь с HUD дуэлей (скрывает скрипт во время баттла)
+local battleSync = ac.connect({
+    ac.StructItem.key("txr_battle_state"),
+    isActive = ac.StructItem.boolean()
+}, false, ac.SharedNamespace.Shared)
+
 -- === КОНФИГУРАЦИЯ СЕКТОРОВ (TIME ATTACK) ===
 local sectors = {
     {
-        name = "TIME ATTACK: 2-LANE SPRINT",
-        startPos = vec3(6091.9, 32.2, -4998.5),   -- Точка старта (1-е фото)
-        finishPos = vec3(4022.8, 17.7, -8586.2),  -- Точка финиша (2-е фото)
+        name = "RACEPORT Route",
+        startPos = vec3(6091.9, 32.2, -4998.5),   -- Точка старта
+        finishPos = vec3(4022.8, 17.7, -8586.2),  -- Точка финиша
         gateRadius = 25.0,                        -- Радиус ворот старта и финиша (25 м)
         bestTime = nil
     }
@@ -37,6 +43,14 @@ local function showBanner(text, color, duration)
 end
 
 function script.update(dt)
+    -- Если активен баттл — сбрасываем текущую попытку и не работаем
+    if battleSync and battleSync.isActive then
+        activeSectorIdx = nil
+        currentTime = 0.0
+        statusTimer = 0.0
+        return
+    end
+
     if statusTimer > 0 then
         statusTimer = statusTimer - dt
     end
@@ -89,25 +103,29 @@ function script.update(dt)
 end
 
 function script.drawUI()
-    if not playerCar then return end
+    -- Полностью скрываем HUD во время дуэли
+    if (battleSync and battleSync.isActive) or not playerCar then
+        return
+    end
 
     local screenSize = ac.getUI().windowSize
     local scaleY = screenSize.y / 1440.0
     local displaySec = activeSectorIdx and sectors[activeSectorIdx] or sectors[1]
 
-    -- Считаем расстояние до старта (когда не в заезде) или до финиша (во время заезда)
     local distToStart = playerCar.position:distance(displaySec.startPos)
     local distToFinish = playerCar.position:distance(displaySec.finishPos)
 
-    -- Показываем HUD всегда, когда игрок в пределах 1500 метров от старта, в заезде или есть рекорд
-    if not activeSectorIdx and statusTimer <= 0 and not displaySec.bestTime and distToStart > 1500.0 then
+    -- Отображаем HUD ТОЛЬКО в заезде, при показе баннера или если до старта <= 400 метров
+    if not activeSectorIdx and statusTimer <= 0 and distToStart > 400.0 then
         return
     end
 
-    local boxW = math.floor(310 * math.max(0.85, scaleY))
+    -- Позиция: сверху справа
+    local boxW = math.floor(320 * math.max(0.85, scaleY))
     local boxH = math.floor(74 * math.max(0.85, scaleY))
-    local x1 = (screenSize.x * 0.5) - boxW - math.floor(190 * math.max(0.85, scaleY))
-    local y1 = math.floor(115 * scaleY)
+    local margin = math.floor(30 * math.max(0.85, scaleY))
+    local x1 = screenSize.x - boxW - margin
+    local y1 = margin
 
     -- Полупрозрачный фон (альфа 0.45)
     ui.drawRectFilled(vec2(x1, y1), vec2(x1 + boxW, y1 + boxH), rgbm(0.05, 0.05, 0.07, 0.45), 3)
@@ -122,13 +140,13 @@ function script.drawUI()
     ui.setCursor(vec2(x1 + 14, y1 + 34))
     if activeSectorIdx then
         ui.textColored("TIME: " .. formatTime(currentTime), rgbm(1.0, 1.0, 1.0, 1))
-    elseif lastTime then
+    elseif statusTimer > 0 and lastTime then
         ui.textColored("LAST: " .. formatTime(lastTime), rgbm(1.0, 1.0, 1.0, 1))
     else
         ui.textColored(string.format("ДО СТАРТА: %.0f м", distToStart), rgbm(0.9, 0.9, 0.9, 0.95))
     end
 
-    -- Правая колонка: лучший результат или дистанция до финиша
+    -- Правая колонка: дистанция до финиша или лучший результат
     local rightStr = activeSectorIdx
         and string.format("ФИНИШ: %.0f м", distToFinish)
         or ("BEST: " .. formatTime(displaySec.bestTime))
@@ -148,4 +166,3 @@ function script.drawUI()
         ui.textColored(statusText, statusColor)
     end
 end
-
